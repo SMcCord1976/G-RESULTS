@@ -1,0 +1,175 @@
+DROP TABLE IF EXISTS bib_dba_utilities..permission_audit_temp;
+GO
+
+SELECT DISTINCT
+    @@SERVERNAME AS ServerName,
+    UserName AS LoginName,
+    UserType AS LoginType,
+    DatabaseUserName,
+    ROLE,
+    PermissionType,
+    PermissionState,
+    DatabaseName = db_name(),
+    DefaultSchema,
+    SecurableName,
+    SecurableType,
+    ColumnName,
+    AccountStatus          -- NEW
+INTO bib_dba_utilities..permission_audit_temp
+FROM (
+    -- Arm 1: direct database principal permissions
+    SELECT
+        UserName = princ.name,
+        UserType = CASE princ.type
+            WHEN 'S' THEN 'SQL Authenticated USER'
+            WHEN 'U' THEN 'Windows Authenticated USER'
+            WHEN 'G' THEN 'Windows GROUP'
+            WHEN 'A' THEN 'Application ROLE'
+            WHEN 'R' THEN 'Database ROLE'
+            WHEN 'K' THEN 'User mapped to ASYMMETRIC KEY'
+            WHEN 'X' THEN 'External GROUP from Microsoft Entra ID'
+            WHEN 'E' THEN 'External USER from Microsoft Entra ID'
+            WHEN 'C' THEN 'User mapped to a CERTIFICATE'
+            ELSE princ.type
+        END,
+        DatabaseUserName = princ.name,
+        ROLE = princ.name,
+        PermissionType = PERM.permission_name,
+        PermissionState = PERM.state_desc,
+        DefaultSchema = princ.default_schema_name,
+        SecurableType = obj.type_desc,
+        SecurableName = COALESCE(OBJECT_NAME(PERM.major_id), db_name()),
+        ColumnName = col.name,
+        1 AS item,
+        AccountStatus = CASE
+            WHEN sp.is_disabled = 1 THEN 'Disabled'
+            WHEN sp.is_disabled = 0 THEN 'Enabled'
+            ELSE NULL
+        END
+    FROM sys.database_principals princ
+    LEFT JOIN sys.server_principals sp ON princ.sid = sp.sid
+    LEFT JOIN sys.login_token ulogin ON princ.sid = ulogin.sid
+    LEFT JOIN sys.database_permissions PERM ON PERM.grantee_principal_id = princ.principal_id
+    LEFT JOIN sys.columns col ON col.object_id = PERM.major_id AND col.column_id = PERM.minor_id
+    LEFT JOIN sys.objects obj ON PERM.major_id = obj.object_id
+
+    UNION
+
+    -- Arm 2: role membership
+    SELECT
+        UserName = memberprinc.name,
+        UserType = CASE memberprinc.type
+            WHEN 'S' THEN 'SQL Authenticated USER'
+            WHEN 'U' THEN 'Windows Authenticated USER'
+            WHEN 'G' THEN 'Windows GROUP'
+            WHEN 'A' THEN 'Application ROLE'
+            WHEN 'R' THEN 'Database ROLE'
+            WHEN 'K' THEN 'User mapped to ASYMMETRIC KEY'
+            WHEN 'X' THEN 'External GROUP from Microsoft Entra ID'
+            WHEN 'E' THEN 'External USER from Microsoft Entra ID'
+            WHEN 'C' THEN 'User mapped to a CERTIFICATE'
+            ELSE memberprinc.type
+        END,
+        DatabaseUserName = memberprinc.name,
+        ROLE = roleprinc.name,
+        PermissionType = PERM.permission_name,
+        PermissionState = PERM.state_desc,
+        DefaultSchema = roleprinc.default_schema_name,
+        SecurableType = obj.type_desc,
+        SecurableName = db_name(),
+        ColumnName = col.name,
+        2 AS item,
+        AccountStatus = CASE
+            WHEN sp.is_disabled = 1 THEN 'Disabled'
+            WHEN sp.is_disabled = 0 THEN 'Enabled'
+            ELSE NULL
+        END
+    FROM sys.database_role_members members
+    INNER JOIN sys.database_principals roleprinc ON roleprinc.principal_id = members.role_principal_id
+    INNER JOIN sys.database_principals memberprinc ON memberprinc.principal_id = members.member_principal_id
+    LEFT JOIN sys.server_principals sp ON memberprinc.sid = sp.sid
+    LEFT JOIN sys.login_token ulogin ON memberprinc.sid = ulogin.sid
+    LEFT JOIN sys.database_permissions PERM ON PERM.grantee_principal_id = roleprinc.principal_id
+    LEFT JOIN sys.columns col ON col.object_id = PERM.major_id AND col.column_id = PERM.minor_id
+    LEFT JOIN sys.objects obj ON PERM.major_id = obj.object_id
+
+    UNION
+
+    -- Arm 3: roles themselves
+    SELECT
+        UserName = roleprinc.name,
+        UserType = CASE roleprinc.type
+            WHEN 'S' THEN 'SQL Authenticated USER'
+            WHEN 'U' THEN 'Windows Authenticated USER'
+            WHEN 'G' THEN 'Windows GROUP'
+            WHEN 'A' THEN 'Application ROLE'
+            WHEN 'R' THEN 'Database ROLE'
+            WHEN 'K' THEN 'User mapped to ASYMMETRIC KEY'
+            WHEN 'X' THEN 'External GROUP from Microsoft Entra ID'
+            WHEN 'E' THEN 'External USER from Microsoft Entra ID'
+            WHEN 'C' THEN 'User mapped to a CERTIFICATE'
+            ELSE roleprinc.type
+        END,
+        DatabaseUserName = roleprinc.name,
+        ROLE = roleprinc.name,
+        PermissionType = PERM.permission_name,
+        PermissionState = PERM.state_desc,
+        DefaultSchema = roleprinc.default_schema_name,
+        SecurableType = obj.type_desc,
+        SecurableName = COALESCE(OBJECT_NAME(PERM.major_id), db_name()),
+        ColumnName = col.name,
+        3 AS item,
+        AccountStatus = CASE
+            WHEN sp.is_disabled = 1 THEN 'Disabled'
+            WHEN sp.is_disabled = 0 THEN 'Enabled'
+            ELSE NULL
+        END
+    FROM sys.database_principals roleprinc
+    LEFT JOIN sys.server_principals sp ON roleprinc.sid = sp.sid
+    LEFT JOIN sys.database_permissions PERM ON PERM.grantee_principal_id = roleprinc.principal_id
+    LEFT JOIN sys.columns col ON col.object_id = PERM.major_id AND col.column_id = PERM.minor_id
+    LEFT JOIN sys.objects obj ON obj.object_id = PERM.major_id
+
+    UNION
+
+    -- Arm 4: server-level principals
+    SELECT
+        UserName = princ.name COLLATE Latin1_General_CI_AS,
+        UserType = CASE princ.type
+            WHEN 'S' THEN 'SQL Authenticated USER'
+            WHEN 'U' THEN 'Windows Authenticated USER'
+            WHEN 'G' THEN 'Windows GROUP'
+            WHEN 'A' THEN 'Application ROLE'
+            WHEN 'R' THEN 'Database ROLE'
+            WHEN 'K' THEN 'User mapped to ASYMMETRIC KEY'
+            WHEN 'X' THEN 'External GROUP from Microsoft Entra ID'
+            WHEN 'E' THEN 'External USER from Microsoft Entra ID'
+            WHEN 'C' THEN 'User mapped to a CERTIFICATE'
+            ELSE princ.type
+        END,
+        DatabaseUserName = princ.name COLLATE Latin1_General_CI_AS,
+        ROLE = CASE
+            WHEN logins.sysadmin = 1 THEN 'sysadmin'
+            WHEN logins.securityadmin = 1 THEN 'securityadmin'
+            WHEN logins.serveradmin = 1 THEN 'serveradmin'
+            WHEN logins.setupadmin = 1 THEN 'setupadmin'
+            WHEN logins.processadmin = 1 THEN 'processadmin'
+            WHEN logins.diskadmin = 1 THEN 'diskadmin'
+            WHEN logins.dbcreator = 1 THEN 'dbcreator'
+            WHEN logins.bulkadmin = 1 THEN 'bulkadmin'
+            ELSE 'Public'
+        END,
+        PermissionType = PERM.permission_name,
+        PermissionState = 'GRANT',
+        DefaultSchema = NULL,
+        SecurableType = NULL,
+        SecurableName = princ.default_database_name,
+        ColumnName = NULL,
+        4 AS item,
+        AccountStatus = CASE WHEN princ.is_disabled = 1 THEN 'Disabled' ELSE 'Enabled' END
+    FROM sys.server_principals princ
+    INNER JOIN sys.syslogins logins ON princ.sid = logins.sid
+    LEFT JOIN sys.database_permissions PERM ON PERM.grantee_principal_id = princ.principal_id
+    WHERE princ.type <> 'R'
+) P
+ORDER BY P.DatabaseUserName, P.SecurableName, P.ColumnName, P.PermissionType, P.PermissionState, P.DefaultSchema, P.SecurableType;
