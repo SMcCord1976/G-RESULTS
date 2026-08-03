@@ -1,0 +1,149 @@
+CREATE TABLE #AuditTemp2
+(
+    [ServerName]          varchar(max),
+    [LoginType]           varchar(max),
+    [LoginName]           varchar(max),
+    [DatabaseUserName]    varchar(max),
+    [PermissionType]      varchar(max),
+    [Role]                varchar(max),
+    [DatabaseName]        varchar(max),
+    [ReportDate]          varchar(max)
+);
+
+INSERT INTO #AuditTemp2
+SELECT
+    [ServerName],
+    [LoginType],
+    [LoginName],
+    [DatabaseUserName],
+    [PermissionType],
+    [Role],
+    [DatabaseName],
+    CONVERT(varchar(20), GETDATE(), 120)
+FROM [bib_dba_utilities].[dbo].[permission_audit_temp]
+WHERE PermissionType LIKE 'EXPLICIT SERVER INSTANCE LEVEL%'
+  AND LoginType != 'Database ROLE'
+  AND LoginType != 'User mapped to a CERTIFICATE'
+  AND LoginName != 'INFORMATION_SCHEMA'
+  AND LoginName NOT IN ('dbo','sa','guest','sys','117968-a1','117962-a1','idera_dm_admin','BIBERK\SVC_SQL_IDERA_DM','cms_admin')
+  AND LoginName NOT LIKE '##%'
+  AND LoginName NOT LIKE 'NT%\%'
+ORDER BY LoginName, PermissionType;
+
+-- HTML scaffolding
+DECLARE @body VARCHAR(MAX) = '
+<html>
+<head>
+<style>
+  #g {color: green;}
+  #r {color: red;}
+  #odd {background-color: #f2f2f2;}
+  th {background-color: #4472C4; color: white; font-weight: bold; padding: 6px; border: 1px solid #999; text-align: center; vertical-align: middle;}
+  td {padding: 4px 6px; border: 1px solid #999; vertical-align: top; font-size: 11px;}
+  .section-note {font-size: 12px; margin-bottom: 12px;}
+</style>
+</head>
+<body>
+<H3><U>EXPLICIT INSTANCE LEVEL LOGINS – User Access Review Format</U></H3>
+
+<div class="section-note">
+<strong>IMPORTANT:</strong> Security group membership is managed outside SQL Server (Active Directory / Entra ID). 
+Login Type is colored <span id="r">red</span> for accounts managed externally.  
+For definitive group membership lists, contact the platform administrator.<br><br>
+<strong>Copy/Paste Instructions:</strong> Select the entire table below (including the header row) and paste directly into the auditor template starting at the “Record Count” header row.  
+The empty columns are intentionally left blank for the solution owner / reviewer to complete.
+</div>
+
+<table border="1" cellspacing="0" cellpadding="0">
+<tr>
+  <th>Record Count</th>
+  <th>User ID</th>
+  <th>User Name</th>
+  <th>Assigned Roles / Permissions</th>
+  <th>Last Login Date<br>(relevant for impact analysis for termed people)</th>
+  <th>Account Status</th>
+  <th>Account Type</th>
+  <th>Password Management (Generic IDs Only)</th>
+  <th>Generic Account Purpose (Generic IDs Only)</th>
+  <th>Authorized Users (Generic IDs Only)</th>
+  <th>Role Owner/Approver Name</th>
+  <th>Access Appropriate?<br>Approve/Modify/Remove</th>
+  <th>Reviewer Comments</th>
+  <th>Remediation Ticket Number</th>
+  <th>Impact Assessment<br>Document steps taken and document references if an impact assessment is necessary.</th>
+</tr>';
+
+DECLARE @i INT = 0, @pos INT, @s VARCHAR(MAX) = '', @ts VARCHAR(MAX), @xml VARCHAR(MAX);
+
+SET @xml = CAST((
+    SELECT
+        ROW_NUMBER() OVER (ORDER BY LoginName, PermissionType) AS 'td', '',
+        LoginName AS 'td', '',
+        DatabaseUserName AS 'td', '',
+        -- Build a clear, self-contained description that includes context
+        ('Instance Level | Server: ' + ServerName + 
+         ' | Role: ' + ISNULL([Role],'') + 
+         ' | Permission: ' + ISNULL(PermissionType,'')) AS 'td', '',
+        '' AS 'td', '',                          -- Last Login Date
+        '' AS 'td', '',                          -- Account Status
+        CASE WHEN LoginType LIKE '%GROUP%' 
+             THEN 'zr' + CAST(LoginType AS VARCHAR(255))
+             ELSE CAST(LoginType AS VARCHAR(255))
+        END AS 'td', '',
+        CASE WHEN LoginName LIKE 'SVC[_]%' OR LoginName LIKE '%[_]SVC[_]%' OR LoginName LIKE 'svc%'
+             THEN 'Managed service account – see purpose column'
+             ELSE 'N/A for named users'
+        END AS 'td', '',
+        CASE WHEN LoginName LIKE 'SVC[_]%' OR LoginName LIKE '%[_]SVC[_]%' OR LoginName LIKE 'svc%'
+             THEN 'Service / application account (review purpose with owner)'
+             ELSE 'N/A for named users'
+        END AS 'td', '',
+        CASE WHEN LoginName LIKE 'SVC[_]%' OR LoginName LIKE '%[_]SVC[_]%' OR LoginName LIKE 'svc%'
+             THEN 'Confirm authorized users / process owners'
+             ELSE 'N/A for named users'
+        END AS 'td', '',
+        '' AS 'td', '',                          -- Role Owner
+        '' AS 'td', '',                          -- Access Appropriate?
+        '' AS 'td', '',                          -- Reviewer Comments
+        '' AS 'td', '',                          -- Ticket
+        '' AS 'td'                               -- Impact Assessment
+    FROM #AuditTemp2
+    ORDER BY LoginName, PermissionType
+    FOR XML PATH('tr'), ELEMENTS
+) AS NVARCHAR(MAX));
+
+-- Color the groups red
+SET @xml = REPLACE(@xml, '<td>zr', '<td id="r">');
+
+-- Zebra striping (same technique you already use – Outlook-friendly)
+SELECT @s = '', @pos = CHARINDEX('<tr>', @xml, 4);
+WHILE (@pos > 0)
+BEGIN
+    SET @i += 1;
+    SET @ts = SUBSTRING(@xml, 1, @pos - 1);
+    IF (@i % 2 = 1) SET @ts = REPLACE(@ts, '<tr>', '<tr id="odd">');
+    SET @s += @ts;
+    SET @xml = SUBSTRING(@xml, @pos, LEN(@xml));
+    SET @pos = CHARINDEX('<tr>', @xml, 4);
+END
+SET @i += 1;
+SET @ts = @xml;
+IF (@i % 2 = 1) SET @ts = REPLACE(@ts, '<tr>', '<tr id="odd">');
+SET @s += @ts;
+
+SET @body += @s + '</table>
+<br><br>
+Regards,<br>
+BIBERK Database Solutions Team
+</body></html>';
+
+DECLARE @MailSubject VARCHAR(255) = '[FOR INFORMATION / REVIEW] - Quarterly User Access Review EXPLICIT SQL SERVER INSTANCE ' + @@SERVERNAME;
+
+EXEC msdb.dbo.sp_send_dbmail
+    @profile_name = 'SQLServer',
+    @recipients   = 'stephen.mccord@BIBERK.com',   -- DEBUGGING – change back when ready
+    @subject      = @MailSubject,
+    @body         = @body,
+    @body_format  = 'HTML';
+
+DROP TABLE #AuditTemp2;
